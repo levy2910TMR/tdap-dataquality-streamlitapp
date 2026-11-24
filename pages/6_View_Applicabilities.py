@@ -17,6 +17,8 @@ def load_applicabilities():
             SELECT
                 A.APPLICABILITY_ID,
                 A.APPLICABILITY_CODE,
+                A.CREATED_TS,
+                A.UPDATED_TS,
                 A.STATUS,
                 T.TEST_CODE,
                 T.TEST_NAME,

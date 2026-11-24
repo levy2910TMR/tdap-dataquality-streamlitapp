@@ -5,6 +5,9 @@ from datetime import date, datetime
 import streamlit as st
 
 from connection import get_connection
+from parameter_controls import (
+    render_parameter_form as shared_render_parameter_form,
+)
 
 
 # =========================================================
@@ -667,638 +670,17 @@ def render_parameter_form(
     asset_options,
     current_asset_id,
 ):
-    parameters = {}
-    rendering_errors = []
-    reference_column_cache = {}
-
-    if not parameter_definition:
-        st.info(
-            "This test does not require configurable parameters."
-        )
-
-        return {}, []
-
-    definition_lookup = {
-        str(
-            item.get(
-                "name",
-                "",
-            )
-        ).strip().upper(): item
-        for item in parameter_definition
-        if isinstance(item, dict)
-    }
-
-    for parameter in parameter_definition:
-        if not isinstance(parameter, dict):
-            rendering_errors.append(
-                "Each parameter definition must be a JSON object."
-            )
-            continue
-
-        parameter_name = str(
-            parameter.get(
-                "name",
-                "",
-            )
-        ).strip().upper()
-
-        parameter_type = str(
-            parameter.get(
-                "type",
-                "",
-            )
-        ).strip().upper()
-
-        depends_on = str(
-            parameter.get(
-                "depends_on",
-                "",
-            )
-        ).strip().upper()
-
-        label = (
-            parameter.get("label")
-            or parameter_name.replace(
-                "_",
-                " ",
-            ).title()
-        )
-
-        help_text = parameter.get(
-            "help"
-        )
-
-        allowed_data_types = parameter.get(
-            "allowed_data_types",
-            [],
-        )
-
-        if not parameter_name:
-            rendering_errors.append(
-                "A parameter definition is missing its name."
-            )
-            continue
-
-        if parameter_type not in SUPPORTED_PARAMETER_TYPES:
-            rendering_errors.append(
-                f"{parameter_name} uses unsupported type "
-                f"{parameter_type or '(blank)'}."
-            )
-            continue
-
-        widget_key = create_parameter_widget_key(
-            selected_test,
-            parameter_name,
-        )
-
-        parameter_column_metadata = (
-            source_column_metadata
-        )
-
-        # -------------------------------------------------
-        # Resolve dependent reference-asset columns
-        # -------------------------------------------------
-
-        if depends_on:
-            dependency_definition = (
-                definition_lookup.get(
-                    depends_on
-                )
-            )
-
-            dependency_type = str(
-                (
-                    dependency_definition
-                    or {}
-                ).get(
-                    "type",
-                    "",
-                )
-            ).strip().upper()
-
-            if dependency_type == "ASSET":
-                reference_value = parameters.get(
-                    depends_on
-                )
-
-                if not reference_value:
-                    parameters[parameter_name] = None
-
-                    st.info(
-                        f"Select "
-                        f"{depends_on.replace('_', ' ').title()} "
-                        f"before configuring {label}."
-                    )
-
-                    continue
-
-                reference_asset = (
-                    get_selected_asset_from_parameter(
-                        reference_value,
-                        asset_options,
-                    )
-                )
-
-                if not reference_asset:
-                    parameters[parameter_name] = None
-
-                    rendering_errors.append(
-                        f"Unable to resolve the selected "
-                        f"{depends_on.replace('_', ' ').title()}."
-                    )
-
-                    continue
-
-                reference_id = reference_asset[
-                    "asset_id"
-                ]
-
-                if reference_id not in reference_column_cache:
-                    try:
-                        reference_column_cache[
-                            reference_id
-                        ] = get_object_columns(
-                            cursor=cursor,
-                            database_name=(
-                                reference_asset[
-                                    "database_name"
-                                ]
-                            ),
-                            schema_name=(
-                                reference_asset[
-                                    "schema_name"
-                                ]
-                            ),
-                            object_name=(
-                                reference_asset[
-                                    "object_name"
-                                ]
-                            ),
-                        )
-
-                    except Exception as reference_error:
-                        parameters[parameter_name] = None
-
-                        rendering_errors.append(
-                            f"Unable to load reference columns "
-                            f"for {label}: {reference_error}"
-                        )
-
-                        continue
-
-                parameter_column_metadata = (
-                    reference_column_cache[
-                        reference_id
-                    ]
-                )
-
-        filtered_columns = filter_columns_by_data_type(
-            parameter_column_metadata,
-            allowed_data_types,
-        )
-
-        available_column_names = get_column_names(
-            filtered_columns
-        )
-
-        # -------------------------------------------------
-        # COLUMN
-        # -------------------------------------------------
-
-        if parameter_type == "COLUMN":
-            if not available_column_names:
-                parameters[parameter_name] = None
-
-                rendering_errors.append(
-                    f"No eligible columns were found for {label}."
-                )
-                continue
-
-            selected_column = st.selectbox(
-                label,
-                options=[
-                    None,
-                    *available_column_names,
-                ],
-                format_func=lambda value: (
-                    f"Select {label.lower()}"
-                    if value is None
-                    else value
-                ),
-                key=widget_key,
-                help=help_text,
-            )
-
-            parameters[parameter_name] = selected_column
-
-            if selected_column:
-                selected_type = get_column_data_type(
-                    filtered_columns,
-                    selected_column,
-                )
-
-                if selected_type:
-                    st.caption(
-                        f"Snowflake datatype: {selected_type}"
-                    )
-
-        # -------------------------------------------------
-        # MULTI COLUMN
-        # -------------------------------------------------
-
-        elif parameter_type == "MULTI_COLUMN":
-            if not available_column_names:
-                parameters[parameter_name] = []
-
-                rendering_errors.append(
-                    f"No eligible columns were found for {label}."
-                )
-                continue
-
-            parameters[parameter_name] = st.multiselect(
-                label,
-                options=available_column_names,
-                key=widget_key,
-                help=(
-                    help_text
-                    or "Select one or more columns."
-                ),
-            )
-
-        # -------------------------------------------------
-        # COLUMN VALUES
-        # -------------------------------------------------
-
-        elif parameter_type == "COLUMN_VALUES":
-            source_parameter = str(
-                parameter.get(
-                    "source_column",
-                    "COLUMN",
-                )
-            ).strip().upper()
-
-            source_column = parameters.get(
-                source_parameter
-            )
-
-            if not source_column:
-                parameters[parameter_name] = []
-
-                st.info(
-                    f"Select "
-                    f"{source_parameter.replace('_', ' ').title()} "
-                    f"before configuring {label}."
-                )
-                continue
-
-            try:
-                available_values = get_distinct_values(
-                    cursor=cursor,
-                    database_name=database_name,
-                    schema_name=schema_name,
-                    object_name=object_name,
-                    column_name=source_column,
-                    limit=parameter.get(
-                        "limit",
-                        200,
-                    ),
-                )
-
-                parameters[parameter_name] = st.multiselect(
-                    label,
-                    options=available_values,
-                    key=widget_key,
-                    help=(
-                        help_text
-                        or "Select one or more allowed values."
-                    ),
-                )
-
-                st.caption(
-                    f"{len(available_values)} distinct values available."
-                )
-
-            except Exception as value_error:
-                parameters[parameter_name] = []
-
-                rendering_errors.append(
-                    f"Unable to load values for {label}: "
-                    f"{value_error}"
-                )
-
-        # -------------------------------------------------
-        # ASSET
-        # -------------------------------------------------
-
-        elif parameter_type == "ASSET":
-            allow_current = bool(
-                parameter.get(
-                    "allow_current_asset",
-                    False,
-                )
-            )
-
-            available_asset_ids = [
-                asset_id
-                for asset_id in asset_options
-                if (
-                    allow_current
-                    or asset_id != current_asset_id
-                )
-            ]
-
-            selected_asset_id = st.selectbox(
-                label,
-                options=[
-                    None,
-                    *available_asset_ids,
-                ],
-                format_func=lambda value: (
-                    format_asset_option(
-                        value,
-                        asset_options,
-                    )
-                ),
-                key=widget_key,
-                help=(
-                    help_text
-                    or "Select a registered reference asset."
-                ),
-            )
-
-            if selected_asset_id is None:
-                parameters[parameter_name] = None
-            else:
-                reference_asset = asset_options[
-                    selected_asset_id
-                ]
-
-                parameters[parameter_name] = (
-                    build_asset_identifier(
-                        reference_asset
-                    )
-                )
-
-        # -------------------------------------------------
-        # VALUE
-        # -------------------------------------------------
-
-        elif parameter_type == "VALUE":
-            value_type = infer_value_type(
-                parameter,
-                parameter_name,
-                parameters,
-                source_column_metadata,
-            )
-
-            default_value = parameter.get(
-                "default"
-            )
-
-            if value_type == "NUMBER":
-                parameters[parameter_name] = st.number_input(
-                    label,
-                    value=float(
-                        default_value
-                        if default_value is not None
-                        else 0.0
-                    ),
-                    step=float(
-                        parameter.get(
-                            "step",
-                            1.0,
-                        )
-                    ),
-                    key=widget_key,
-                    help=help_text,
-                )
-
-            elif value_type == "INTEGER":
-                parameters[parameter_name] = int(
-                    st.number_input(
-                        label,
-                        value=int(
-                            default_value
-                            if default_value is not None
-                            else 0
-                        ),
-                        step=1,
-                        key=widget_key,
-                        help=help_text,
-                    )
-                )
-
-            elif value_type == "BOOLEAN":
-                parameters[parameter_name] = st.selectbox(
-                    label,
-                    options=[
-                        None,
-                        True,
-                        False,
-                    ],
-                    format_func=lambda value: (
-                        "Select true or false"
-                        if value is None
-                        else str(value).upper()
-                    ),
-                    key=widget_key,
-                    help=help_text,
-                )
-
-            elif value_type == "DATE":
-                selected_date = st.date_input(
-                    label,
-                    value=parse_default_date(
-                        default_value
-                    ),
-                    key=widget_key,
-                    help=help_text,
-                )
-
-                parameters[parameter_name] = (
-                    selected_date.isoformat()
-                )
-
-            elif value_type == "TIMESTAMP":
-                parameters[parameter_name] = st.text_input(
-                    label,
-                    value=(
-                        str(default_value)
-                        if default_value is not None
-                        else ""
-                    ),
-                    placeholder="9999-12-31 23:59:59",
-                    key=widget_key,
-                    help=(
-                        help_text
-                        or "Use YYYY-MM-DD HH:MM:SS."
-                    ),
-                )
-
-            else:
-                parameters[parameter_name] = st.text_input(
-                    label,
-                    value=(
-                        str(default_value)
-                        if default_value is not None
-                        else ""
-                    ),
-                    key=widget_key,
-                    help=(
-                        help_text
-                        or "Enter the required comparison value."
-                    ),
-                )
-
-            st.caption(
-                f"Value input type: {value_type}"
-            )
-
-        # -------------------------------------------------
-        # NUMBER
-        # -------------------------------------------------
-
-        elif parameter_type == "NUMBER":
-            arguments = {
-                "label": label,
-                "value": float(
-                    parameter.get(
-                        "default",
-                        0.0,
-                    )
-                ),
-                "step": float(
-                    parameter.get(
-                        "step",
-                        1.0,
-                    )
-                ),
-                "key": widget_key,
-                "help": help_text,
-            }
-
-            if parameter.get("minimum") is not None:
-                arguments["min_value"] = float(
-                    parameter["minimum"]
-                )
-
-            if parameter.get("maximum") is not None:
-                arguments["max_value"] = float(
-                    parameter["maximum"]
-                )
-
-            parameters[parameter_name] = st.number_input(
-                **arguments
-            )
-
-        # -------------------------------------------------
-        # INTEGER
-        # -------------------------------------------------
-
-        elif parameter_type == "INTEGER":
-            parameters[parameter_name] = int(
-                st.number_input(
-                    label,
-                    min_value=int(
-                        parameter.get(
-                            "minimum",
-                            -2147483648,
-                        )
-                    ),
-                    max_value=int(
-                        parameter.get(
-                            "maximum",
-                            2147483647,
-                        )
-                    ),
-                    value=int(
-                        parameter.get(
-                            "default",
-                            0,
-                        )
-                    ),
-                    step=1,
-                    key=widget_key,
-                    help=help_text,
-                )
-            )
-
-        # -------------------------------------------------
-        # OPERATOR
-        # -------------------------------------------------
-
-        elif parameter_type == "OPERATOR":
-            allowed_operators = parameter.get(
-                "allowed_values",
-                parameter.get(
-                    "options",
-                    DEFAULT_OPERATORS,
-                ),
-            )
-
-            allowed_operators = [
-                str(operator)
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .strip()
-                for operator in allowed_operators
-            ]
-
-            invalid = [
-                operator
-                for operator in allowed_operators
-                if operator not in DEFAULT_OPERATORS
-            ]
-
-            if invalid:
-                parameters[parameter_name] = None
-
-                rendering_errors.append(
-                    f"{parameter_name} contains unsupported "
-                    f"operators: {', '.join(invalid)}."
-                )
-                continue
-
-            parameters[parameter_name] = st.selectbox(
-                label,
-                options=allowed_operators,
-                key=widget_key,
-                help=(
-                    help_text
-                    or "Select the failure comparison operator."
-                ),
-            )
-
-        # -------------------------------------------------
-        # REGEX PRESET
-        # -------------------------------------------------
-
-        elif parameter_type == "REGEX_PRESET":
-            selected_preset = st.selectbox(
-                label,
-                options=list(
-                    REGEX_PRESETS.keys()
-                ),
-                key=widget_key,
-                help=(
-                    help_text
-                    or "Choose an approved regular expression."
-                ),
-            )
-
-            parameters[parameter_name] = (
-                REGEX_PRESETS[
-                    selected_preset
-                ]
-            )
-
-            st.code(
-                parameters[parameter_name],
-                language="text",
-            )
-
-    return parameters, rendering_errors
+    return shared_render_parameter_form(
+        cursor=cursor,
+        selected_test=selected_test,
+        parameter_definition=parameter_definition,
+        source_column_metadata=source_column_metadata,
+        database_name=database_name,
+        schema_name=schema_name,
+        object_name=object_name,
+        asset_options=asset_options,
+        current_asset_id=current_asset_id,
+    )
 
 
 # =========================================================
@@ -1414,139 +796,54 @@ try:
         )
 
     else:
-        st.subheader("1. Select Data Asset")
-
-        database_options = sorted(
-            {
-                asset["database_name"]
-                for asset in assets
-            }
+        cursor.execute(
+            """
+            SELECT
+                TEST_ID,
+                TEST_CODE,
+                TEST_NAME,
+                TEST_DESCRIPTION,
+                PARAMETER_DEFINITION
+            FROM DP_DEV_MTD.DATA_QUALITY.DQ_TEST
+            WHERE STATUS = 'ACTIVE'
+            ORDER BY TEST_CODE
+            """
         )
 
-        selected_database = st.selectbox(
-            "Database",
-            options=[
-                None,
-                *database_options,
-            ],
-            format_func=lambda value: (
-                "Select a database"
-                if value is None
-                else value
-            ),
-            key="selected_database",
-            on_change=reset_after_database_change,
-        )
+        tests = cursor.fetchall()
 
-        selected_schema = None
-        selected_asset = None
+        test_options = {
+            row[1]: {
+                "test_id": row[0],
+                "test_name": row[2],
+                "test_description": row[3],
+                "parameter_definition": row[4],
+            }
+            for row in tests
+        }
 
-        if selected_database:
-            schema_options = sorted(
-                {
-                    asset["schema_name"]
-                    for asset in assets
-                    if asset["database_name"]
-                    == selected_database
-                }
-            )
+        asset_column, test_column = st.columns(2)
 
-            selected_schema = st.selectbox(
-                "Schema",
+        with asset_column:
+            selected_asset_id = st.selectbox(
+                "Data Asset",
                 options=[
                     None,
-                    *schema_options,
+                    *asset_options.keys(),
                 ],
                 format_func=lambda value: (
-                    "Select a schema"
+                    "Select a data asset"
                     if value is None
-                    else value
+                    else format_asset_option(
+                        value,
+                        asset_options,
+                    )
                 ),
-                key="selected_schema",
-                on_change=reset_after_schema_change,
+                key="selected_asset_id",
+                on_change=reset_test_parameters,
             )
 
-        if selected_database and selected_schema:
-            matching_assets = [
-                asset
-                for asset in assets
-                if (
-                    asset["database_name"]
-                    == selected_database
-                    and asset["schema_name"]
-                    == selected_schema
-                )
-            ]
-
-            object_options = {
-                (
-                    f"{asset['object_name']} "
-                    f"({asset['object_type']})"
-                ): asset
-                for asset in matching_assets
-            }
-
-            selected_object = st.selectbox(
-                "Table / Object",
-                options=[
-                    None,
-                    *object_options.keys(),
-                ],
-                format_func=lambda value: (
-                    "Select a table or view"
-                    if value is None
-                    else value
-                ),
-                key="selected_object",
-                on_change=reset_after_object_change,
-            )
-
-            if selected_object:
-                selected_asset = object_options[
-                    selected_object
-                ]
-
-        if selected_asset:
-            asset_id = selected_asset["asset_id"]
-            asset_code = selected_asset["asset_code"]
-            database_name = selected_asset["database_name"]
-            schema_name = selected_asset["schema_name"]
-            object_name = selected_asset["object_name"]
-
-            st.success(
-                f"Selected: {database_name}."
-                f"{schema_name}.{object_name}"
-            )
-
-            cursor.execute(
-                """
-                SELECT
-                    TEST_ID,
-                    TEST_CODE,
-                    TEST_NAME,
-                    TEST_DESCRIPTION,
-                    PARAMETER_DEFINITION
-                FROM DP_DEV_MTD.DATA_QUALITY.DQ_TEST
-                WHERE STATUS = 'ACTIVE'
-                ORDER BY TEST_CODE
-                """
-            )
-
-            tests = cursor.fetchall()
-
-            test_options = {
-                row[1]: {
-                    "test_id": row[0],
-                    "test_name": row[2],
-                    "test_description": row[3],
-                    "parameter_definition": row[4],
-                }
-                for row in tests
-            }
-
-            st.divider()
-            st.subheader("2. Select Test")
-
+        with test_column:
             selected_test = st.selectbox(
                 "Data Quality Test",
                 options=[
@@ -1561,6 +858,22 @@ try:
                 ),
                 key="selected_test",
                 on_change=reset_test_parameters,
+            )
+
+        selected_asset = asset_options.get(
+            selected_asset_id
+        )
+
+        if selected_asset:
+            asset_id = selected_asset["asset_id"]
+            asset_code = selected_asset["asset_code"]
+            database_name = selected_asset["database_name"]
+            schema_name = selected_asset["schema_name"]
+            object_name = selected_asset["object_name"]
+
+            st.success(
+                f"Selected: {database_name}."
+                f"{schema_name}.{object_name}"
             )
 
             if selected_test:
@@ -1596,9 +909,7 @@ try:
                 )
 
                 st.divider()
-                st.subheader(
-                    "3. Configure Test Parameters"
-                )
+                st.subheader("Test Parameters")
 
                 parameters, rendering_errors = (
                     render_parameter_form(
@@ -1623,9 +934,7 @@ try:
 
                 if not rendering_errors:
                     st.divider()
-                    st.subheader(
-                        "4. Configure Applicability"
-                    )
+                    st.subheader("Applicability Settings")
 
                     default_code = (
                         generate_applicability_code(
@@ -1730,9 +1039,7 @@ try:
                     }
 
                     st.divider()
-                    st.subheader(
-                        "5. Review and Create"
-                    )
+                    st.subheader("Review and Create")
 
                     if st.button(
                         "Review Configuration",

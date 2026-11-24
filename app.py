@@ -43,6 +43,8 @@ if test_pages:
 applicability_pages = available_pages([
     ("pages/3_Configure_Applicability.py", "Configure Applicability"),
     ("pages/6_View_Applicabilities.py", "View Applicability"),
+    ("pages/8_Edit_Applicability.py", "Edit Applicability"),
+    ("pages/9_Delete_Applicability.py", "Delete Applicability"),
     ("pages/7_Applicability_Guide.py", "Applicability Guide"),
 ])
 if applicability_pages:
