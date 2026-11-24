@@ -41,11 +41,11 @@ if test_pages:
     navigation["Test Management"] = test_pages
 
 applicability_pages = available_pages([
-    ("pages/3_Configure_Applicability.py", "Configure Applicability"),
-    ("pages/6_View_Applicabilities.py", "View Applicability"),
-    ("pages/8_Edit_Applicability.py", "Edit Applicability"),
-    ("pages/9_Delete_Applicability.py", "Delete Applicability"),
-    ("pages/7_Applicability_Guide.py", "Applicability Guide"),
+    ("pages/1_Configure_Applicability.py", "Configure Applicability"),
+    ("pages/3_View_Applicabilities.py", "View Applicability"),
+    ("pages/5_Edit_Applicability.py", "Edit Applicability"),
+    ("pages/6_Delete_Applicability.py", "Delete Applicability"),
+    ("pages/4_Applicability_Guide.py", "Applicability Guide"),
 ])
 if applicability_pages:
     navigation["Applicability"] = applicability_pages
@@ -57,7 +57,7 @@ if execution_pages:
     navigation["Execution"] = execution_pages
 
 navigation["Results"] = available_pages([
-    ("pages/5_View_Results.py", "View Results"),
+    ("pages/2_View_Results.py", "View Results"),
 ]) or [st.Page(results_unavailable, title="View Results")]
 
 st.navigation(navigation).run()
