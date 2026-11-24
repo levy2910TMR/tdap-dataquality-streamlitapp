@@ -1,60 +1,153 @@
 import json
+import re
+from datetime import date, datetime
 
 import streamlit as st
 
 from connection import get_connection
 
 
-st.title("Configure Applicability")
+# =========================================================
+# PAGE
+# =========================================================
+
+st.title("Configure Data Quality Test")
 
 st.write(
-    "Configure which data quality tests apply to a registered data asset."
+    "Select an asset, choose a test, configure its parameters, "
+    "and define how the test should run."
+)
+
+st.caption(
+    "The form is generated dynamically from PARAMETER_DEFINITION "
+    "in the DQ test catalogue."
 )
 
 
 # =========================================================
-# SESSION STATE HELPERS
+# CONTROLLED VALUES
+# =========================================================
+
+REGEX_PRESETS = {
+    "Email address": r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
+    "Digits only": r"^[0-9]+$",
+    "Letters only": r"^[A-Za-z]+$",
+    "Alphanumeric": r"^[A-Za-z0-9]+$",
+    "Australian postcode": r"^[0-9]{4}$",
+    "ISO date (YYYY-MM-DD)": (
+        r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    ),
+}
+
+SUPPORTED_PARAMETER_TYPES = {
+    "COLUMN",
+    "MULTI_COLUMN",
+    "COLUMN_VALUES",
+    "NUMBER",
+    "INTEGER",
+    "REGEX_PRESET",
+    "ASSET",
+    "VALUE",
+    "OPERATOR",
+}
+
+DEFAULT_OPERATORS = [
+    "=",
+    "<>",
+    "!=",
+    ">",
+    ">=",
+    "<",
+    "<=",
+]
+
+TEXT_DATA_TYPES = {
+    "TEXT",
+    "VARCHAR",
+    "CHAR",
+    "CHARACTER",
+    "STRING",
+}
+
+NUMBER_DATA_TYPES = {
+    "NUMBER",
+    "DECIMAL",
+    "NUMERIC",
+    "FLOAT",
+    "DOUBLE",
+    "DOUBLE PRECISION",
+    "REAL",
+    "INTEGER",
+    "INT",
+    "BIGINT",
+    "SMALLINT",
+    "BYTEINT",
+}
+
+INTEGER_DATA_TYPES = {
+    "INTEGER",
+    "INT",
+    "BIGINT",
+    "SMALLINT",
+    "BYTEINT",
+}
+
+DATE_DATA_TYPES = {
+    "DATE",
+}
+
+TIMESTAMP_DATA_TYPES = {
+    "TIMESTAMP",
+    "TIMESTAMP_NTZ",
+    "TIMESTAMP_LTZ",
+    "TIMESTAMP_TZ",
+    "DATETIME",
+}
+
+BOOLEAN_DATA_TYPES = {
+    "BOOLEAN",
+    "BOOL",
+}
+
+
+# =========================================================
+# SESSION STATE
 # =========================================================
 
 def clear_widget_keys(keys):
-    """
-    Remove the supplied widget keys from Streamlit session state.
-    """
-
     for key in keys:
         st.session_state.pop(key, None)
 
 
+def clear_dynamic_parameter_widgets():
+    keys = [
+        key
+        for key in list(st.session_state.keys())
+        if key.startswith("dq_parameter_")
+    ]
+
+    clear_widget_keys(keys)
+
+
 def reset_test_parameters():
-    """
-    Clear test-dependent parameter fields.
-    """
+    clear_dynamic_parameter_widgets()
 
     clear_widget_keys(
         [
-            "null_count_column",
-            "duplicate_count_column",
-            "range_column",
-            "range_min_value",
-            "range_max_value",
-            "date_start_column",
-            "date_end_column",
-            "length_column",
-            "maximum_length",
-            "pattern_column",
-            "regex_pattern",
-            "allowed_values_column",
-            "allowed_values_text",
-            "raw_parameters",
+            "applicability_code",
+            "execution_mode",
+            "frequency",
+            "run_day_of_week",
+            "run_day_of_month",
+            "pass_lower_bound",
+            "pass_upper_bound",
+            "pending_applicability",
+            "applicability_saved",
         ]
     )
 
 
 def reset_applicability_configuration():
-    """
-    Clear the test and applicability configuration.
-    """
-
     clear_widget_keys(
         [
             "selected_test",
@@ -65,17 +158,15 @@ def reset_applicability_configuration():
             "run_day_of_month",
             "pass_lower_bound",
             "pass_upper_bound",
+            "pending_applicability",
+            "applicability_saved",
         ]
     )
 
-    reset_test_parameters()
+    clear_dynamic_parameter_widgets()
 
 
 def reset_after_database_change():
-    """
-    Changing database resets schema, object, test and configuration.
-    """
-
     clear_widget_keys(
         [
             "selected_schema",
@@ -87,10 +178,6 @@ def reset_after_database_change():
 
 
 def reset_after_schema_change():
-    """
-    Changing schema resets object, test and configuration.
-    """
-
     clear_widget_keys(
         [
             "selected_object",
@@ -101,28 +188,279 @@ def reset_after_schema_change():
 
 
 def reset_after_object_change():
-    """
-    Changing object resets test and configuration.
-    """
-
     reset_applicability_configuration()
 
 
 # =========================================================
-# SNOWFLAKE CONNECTION
+# GENERAL HELPERS
 # =========================================================
 
-conn = None
-cursor = None
+def make_safe_code(value):
+    safe_value = re.sub(
+        r"[^A-Za-z0-9]+",
+        "_",
+        str(value).strip().upper(),
+    )
 
-try:
-    conn = get_connection()
-    cursor = conn.cursor()
+    return safe_value.strip("_")
 
-    # =====================================================
-    # LOAD ACTIVE ASSETS
-    # =====================================================
 
+def generate_applicability_code(
+    asset_code,
+    object_name,
+    test_code,
+):
+    asset_part = asset_code or object_name
+
+    return make_safe_code(
+        f"{asset_part}_{test_code}"
+    )
+
+
+def create_parameter_widget_key(
+    selected_test,
+    parameter_name,
+):
+    safe_test = re.sub(
+        r"[^A-Za-z0-9_]+",
+        "_",
+        str(selected_test).upper(),
+    )
+
+    safe_parameter = re.sub(
+        r"[^A-Za-z0-9_]+",
+        "_",
+        str(parameter_name).upper(),
+    )
+
+    return (
+        f"dq_parameter_"
+        f"{safe_test}_"
+        f"{safe_parameter}"
+    )
+
+
+def parameter_is_empty(value):
+    if value is None:
+        return True
+
+    if isinstance(value, str):
+        return not value.strip()
+
+    if isinstance(value, list):
+        return len(value) == 0
+
+    if isinstance(value, dict):
+        return len(value) == 0
+
+    return False
+
+
+def quote_identifier(value):
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def parse_parameter_definition(raw_definition):
+    if raw_definition is None:
+        return []
+
+    if isinstance(raw_definition, list):
+        return raw_definition
+
+    if isinstance(raw_definition, dict):
+        return [raw_definition]
+
+    if isinstance(raw_definition, str):
+        if not raw_definition.strip():
+            return []
+
+        parsed = json.loads(
+            raw_definition
+        )
+
+        if isinstance(parsed, list):
+            return parsed
+
+        if isinstance(parsed, dict):
+            return [parsed]
+
+    raise ValueError(
+        "PARAMETER_DEFINITION must contain a JSON array or object."
+    )
+
+
+def format_test_option(
+    test_code,
+    test_options,
+):
+    if test_code is None:
+        return "Select a test"
+
+    metadata = test_options.get(
+        test_code,
+        {},
+    )
+
+    test_name = metadata.get(
+        "test_name"
+    )
+
+    if test_name:
+        return f"{test_name} · {test_code}"
+
+    return test_code
+
+
+# =========================================================
+# COLUMN HELPERS
+# =========================================================
+
+def get_object_columns(
+    cursor,
+    database_name,
+    schema_name,
+    object_name,
+):
+    database = quote_identifier(
+        database_name
+    )
+
+    sql = f"""
+        SELECT
+            COLUMN_NAME,
+            UPPER(DATA_TYPE) AS DATA_TYPE,
+            ORDINAL_POSITION
+        FROM {database}.INFORMATION_SCHEMA.COLUMNS
+        WHERE UPPER(TABLE_SCHEMA) = UPPER(%s)
+          AND UPPER(TABLE_NAME) = UPPER(%s)
+        ORDER BY ORDINAL_POSITION
+    """
+
+    cursor.execute(
+        sql,
+        (
+            schema_name,
+            object_name,
+        ),
+        timeout=30,
+    )
+
+    return [
+        {
+            "name": row[0],
+            "data_type": (
+                str(row[1]).upper()
+                if row[1] is not None
+                else None
+            ),
+            "ordinal_position": row[2],
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+def get_column_names(column_metadata):
+    return [
+        column["name"]
+        for column in column_metadata
+    ]
+
+
+def get_column_data_type(
+    column_metadata,
+    column_name,
+):
+    if not column_name:
+        return None
+
+    for column in column_metadata:
+        if (
+            str(column["name"]).upper()
+            == str(column_name).upper()
+        ):
+            return column["data_type"]
+
+    return None
+
+
+def filter_columns_by_data_type(
+    column_metadata,
+    allowed_data_types,
+):
+    if not allowed_data_types:
+        return column_metadata
+
+    allowed_types = {
+        str(data_type).strip().upper()
+        for data_type in allowed_data_types
+    }
+
+    return [
+        column
+        for column in column_metadata
+        if (
+            column["data_type"]
+            and column["data_type"].upper()
+            in allowed_types
+        )
+    ]
+
+
+def get_distinct_values(
+    cursor,
+    database_name,
+    schema_name,
+    object_name,
+    column_name,
+    limit=200,
+):
+    database = quote_identifier(
+        database_name
+    )
+
+    schema = quote_identifier(
+        schema_name
+    )
+
+    object_ = quote_identifier(
+        object_name
+    )
+
+    column = quote_identifier(
+        column_name
+    )
+
+    safe_limit = min(
+        max(int(limit), 1),
+        500,
+    )
+
+    sql = f"""
+        SELECT DISTINCT
+            TO_VARCHAR({column}) AS COLUMN_VALUE
+        FROM {database}.{schema}.{object_}
+        WHERE {column} IS NOT NULL
+        ORDER BY COLUMN_VALUE
+        LIMIT {safe_limit}
+    """
+
+    cursor.execute(
+        sql,
+        timeout=30,
+    )
+
+    return [
+        row[0]
+        for row in cursor.fetchall()
+        if row[0] is not None
+    ]
+
+
+# =========================================================
+# ASSET HELPERS
+# =========================================================
+
+def get_active_assets(cursor):
     cursor.execute(
         """
         SELECT
@@ -142,7 +480,933 @@ try:
         """
     )
 
-    assets = cursor.fetchall()
+    rows = cursor.fetchall()
+
+    return {
+        row[0]: {
+            "asset_id": row[0],
+            "asset_code": row[1],
+            "database_name": row[2],
+            "schema_name": row[3],
+            "object_name": row[4],
+            "object_type": row[5],
+            "asset_description": row[6],
+        }
+        for row in rows
+    }
+
+
+def build_asset_identifier(asset):
+    return (
+        f"{asset['database_name']}."
+        f"{asset['schema_name']}."
+        f"{asset['object_name']}"
+    )
+
+
+def format_asset_option(
+    asset_id,
+    asset_options,
+):
+    if asset_id is None:
+        return "Select a reference asset"
+
+    asset = asset_options.get(
+        asset_id
+    )
+
+    if not asset:
+        return str(asset_id)
+
+    return (
+        f"{asset['database_name']}."
+        f"{asset['schema_name']}."
+        f"{asset['object_name']} "
+        f"({asset['object_type']})"
+    )
+
+
+def get_selected_asset_from_parameter(
+    parameter_value,
+    asset_options,
+):
+    if parameter_value is None:
+        return None
+
+    parameter_fqn = str(
+        parameter_value
+    ).upper()
+
+    for asset in asset_options.values():
+        if (
+            build_asset_identifier(asset).upper()
+            == parameter_fqn
+        ):
+            return asset
+
+    return None
+
+
+# =========================================================
+# VALUE HELPERS
+# =========================================================
+
+def infer_value_type(
+    parameter,
+    parameter_name,
+    parameters,
+    source_column_metadata,
+):
+    explicit_type = parameter.get(
+        "value_type"
+    )
+
+    if explicit_type:
+        return str(
+            explicit_type
+        ).strip().upper()
+
+    depends_on = str(
+        parameter.get(
+            "depends_on",
+            "",
+        )
+    ).strip().upper()
+
+    if depends_on:
+        dependent_column = parameters.get(
+            depends_on
+        )
+
+        dependent_type = get_column_data_type(
+            source_column_metadata,
+            dependent_column,
+        )
+
+        if dependent_type in INTEGER_DATA_TYPES:
+            return "INTEGER"
+
+        if dependent_type in NUMBER_DATA_TYPES:
+            return "NUMBER"
+
+        if dependent_type in DATE_DATA_TYPES:
+            return "DATE"
+
+        if dependent_type in TIMESTAMP_DATA_TYPES:
+            return "TIMESTAMP"
+
+        if dependent_type in BOOLEAN_DATA_TYPES:
+            return "BOOLEAN"
+
+    combined_name = (
+        f"{parameter_name} "
+        f"{parameter.get('label', '')}"
+    ).upper()
+
+    if "TIMESTAMP" in combined_name:
+        return "TIMESTAMP"
+
+    if "DATE" in combined_name:
+        return "DATE"
+
+    return "TEXT"
+
+
+def parse_default_date(default_value):
+    if isinstance(default_value, datetime):
+        return default_value.date()
+
+    if isinstance(default_value, date):
+        return default_value
+
+    if isinstance(default_value, str):
+        try:
+            return date.fromisoformat(
+                default_value[:10]
+            )
+        except ValueError:
+            pass
+
+    return date.today()
+
+
+# =========================================================
+# DATABASE VALIDATION
+# =========================================================
+
+def applicability_code_exists(
+    cursor,
+    applicability_code,
+):
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM DP_DEV_MTD.DATA_QUALITY.DQ_APPLICABILITY
+        WHERE UPPER(APPLICABILITY_CODE) = UPPER(%s)
+        """,
+        (
+            applicability_code,
+        ),
+    )
+
+    return cursor.fetchone()[0] > 0
+
+
+# =========================================================
+# GENERIC PARAMETER RENDERER
+# =========================================================
+
+def render_parameter_form(
+    cursor,
+    selected_test,
+    parameter_definition,
+    source_column_metadata,
+    database_name,
+    schema_name,
+    object_name,
+    asset_options,
+    current_asset_id,
+):
+    parameters = {}
+    rendering_errors = []
+    reference_column_cache = {}
+
+    if not parameter_definition:
+        st.info(
+            "This test does not require configurable parameters."
+        )
+
+        return {}, []
+
+    definition_lookup = {
+        str(
+            item.get(
+                "name",
+                "",
+            )
+        ).strip().upper(): item
+        for item in parameter_definition
+        if isinstance(item, dict)
+    }
+
+    for parameter in parameter_definition:
+        if not isinstance(parameter, dict):
+            rendering_errors.append(
+                "Each parameter definition must be a JSON object."
+            )
+            continue
+
+        parameter_name = str(
+            parameter.get(
+                "name",
+                "",
+            )
+        ).strip().upper()
+
+        parameter_type = str(
+            parameter.get(
+                "type",
+                "",
+            )
+        ).strip().upper()
+
+        depends_on = str(
+            parameter.get(
+                "depends_on",
+                "",
+            )
+        ).strip().upper()
+
+        label = (
+            parameter.get("label")
+            or parameter_name.replace(
+                "_",
+                " ",
+            ).title()
+        )
+
+        help_text = parameter.get(
+            "help"
+        )
+
+        allowed_data_types = parameter.get(
+            "allowed_data_types",
+            [],
+        )
+
+        if not parameter_name:
+            rendering_errors.append(
+                "A parameter definition is missing its name."
+            )
+            continue
+
+        if parameter_type not in SUPPORTED_PARAMETER_TYPES:
+            rendering_errors.append(
+                f"{parameter_name} uses unsupported type "
+                f"{parameter_type or '(blank)'}."
+            )
+            continue
+
+        widget_key = create_parameter_widget_key(
+            selected_test,
+            parameter_name,
+        )
+
+        parameter_column_metadata = (
+            source_column_metadata
+        )
+
+        # -------------------------------------------------
+        # Resolve dependent reference-asset columns
+        # -------------------------------------------------
+
+        if depends_on:
+            dependency_definition = (
+                definition_lookup.get(
+                    depends_on
+                )
+            )
+
+            dependency_type = str(
+                (
+                    dependency_definition
+                    or {}
+                ).get(
+                    "type",
+                    "",
+                )
+            ).strip().upper()
+
+            if dependency_type == "ASSET":
+                reference_value = parameters.get(
+                    depends_on
+                )
+
+                if not reference_value:
+                    parameters[parameter_name] = None
+
+                    st.info(
+                        f"Select "
+                        f"{depends_on.replace('_', ' ').title()} "
+                        f"before configuring {label}."
+                    )
+
+                    continue
+
+                reference_asset = (
+                    get_selected_asset_from_parameter(
+                        reference_value,
+                        asset_options,
+                    )
+                )
+
+                if not reference_asset:
+                    parameters[parameter_name] = None
+
+                    rendering_errors.append(
+                        f"Unable to resolve the selected "
+                        f"{depends_on.replace('_', ' ').title()}."
+                    )
+
+                    continue
+
+                reference_id = reference_asset[
+                    "asset_id"
+                ]
+
+                if reference_id not in reference_column_cache:
+                    try:
+                        reference_column_cache[
+                            reference_id
+                        ] = get_object_columns(
+                            cursor=cursor,
+                            database_name=(
+                                reference_asset[
+                                    "database_name"
+                                ]
+                            ),
+                            schema_name=(
+                                reference_asset[
+                                    "schema_name"
+                                ]
+                            ),
+                            object_name=(
+                                reference_asset[
+                                    "object_name"
+                                ]
+                            ),
+                        )
+
+                    except Exception as reference_error:
+                        parameters[parameter_name] = None
+
+                        rendering_errors.append(
+                            f"Unable to load reference columns "
+                            f"for {label}: {reference_error}"
+                        )
+
+                        continue
+
+                parameter_column_metadata = (
+                    reference_column_cache[
+                        reference_id
+                    ]
+                )
+
+        filtered_columns = filter_columns_by_data_type(
+            parameter_column_metadata,
+            allowed_data_types,
+        )
+
+        available_column_names = get_column_names(
+            filtered_columns
+        )
+
+        # -------------------------------------------------
+        # COLUMN
+        # -------------------------------------------------
+
+        if parameter_type == "COLUMN":
+            if not available_column_names:
+                parameters[parameter_name] = None
+
+                rendering_errors.append(
+                    f"No eligible columns were found for {label}."
+                )
+                continue
+
+            selected_column = st.selectbox(
+                label,
+                options=[
+                    None,
+                    *available_column_names,
+                ],
+                format_func=lambda value: (
+                    f"Select {label.lower()}"
+                    if value is None
+                    else value
+                ),
+                key=widget_key,
+                help=help_text,
+            )
+
+            parameters[parameter_name] = selected_column
+
+            if selected_column:
+                selected_type = get_column_data_type(
+                    filtered_columns,
+                    selected_column,
+                )
+
+                if selected_type:
+                    st.caption(
+                        f"Snowflake datatype: {selected_type}"
+                    )
+
+        # -------------------------------------------------
+        # MULTI COLUMN
+        # -------------------------------------------------
+
+        elif parameter_type == "MULTI_COLUMN":
+            if not available_column_names:
+                parameters[parameter_name] = []
+
+                rendering_errors.append(
+                    f"No eligible columns were found for {label}."
+                )
+                continue
+
+            parameters[parameter_name] = st.multiselect(
+                label,
+                options=available_column_names,
+                key=widget_key,
+                help=(
+                    help_text
+                    or "Select one or more columns."
+                ),
+            )
+
+        # -------------------------------------------------
+        # COLUMN VALUES
+        # -------------------------------------------------
+
+        elif parameter_type == "COLUMN_VALUES":
+            source_parameter = str(
+                parameter.get(
+                    "source_column",
+                    "COLUMN",
+                )
+            ).strip().upper()
+
+            source_column = parameters.get(
+                source_parameter
+            )
+
+            if not source_column:
+                parameters[parameter_name] = []
+
+                st.info(
+                    f"Select "
+                    f"{source_parameter.replace('_', ' ').title()} "
+                    f"before configuring {label}."
+                )
+                continue
+
+            try:
+                available_values = get_distinct_values(
+                    cursor=cursor,
+                    database_name=database_name,
+                    schema_name=schema_name,
+                    object_name=object_name,
+                    column_name=source_column,
+                    limit=parameter.get(
+                        "limit",
+                        200,
+                    ),
+                )
+
+                parameters[parameter_name] = st.multiselect(
+                    label,
+                    options=available_values,
+                    key=widget_key,
+                    help=(
+                        help_text
+                        or "Select one or more allowed values."
+                    ),
+                )
+
+                st.caption(
+                    f"{len(available_values)} distinct values available."
+                )
+
+            except Exception as value_error:
+                parameters[parameter_name] = []
+
+                rendering_errors.append(
+                    f"Unable to load values for {label}: "
+                    f"{value_error}"
+                )
+
+        # -------------------------------------------------
+        # ASSET
+        # -------------------------------------------------
+
+        elif parameter_type == "ASSET":
+            allow_current = bool(
+                parameter.get(
+                    "allow_current_asset",
+                    False,
+                )
+            )
+
+            available_asset_ids = [
+                asset_id
+                for asset_id in asset_options
+                if (
+                    allow_current
+                    or asset_id != current_asset_id
+                )
+            ]
+
+            selected_asset_id = st.selectbox(
+                label,
+                options=[
+                    None,
+                    *available_asset_ids,
+                ],
+                format_func=lambda value: (
+                    format_asset_option(
+                        value,
+                        asset_options,
+                    )
+                ),
+                key=widget_key,
+                help=(
+                    help_text
+                    or "Select a registered reference asset."
+                ),
+            )
+
+            if selected_asset_id is None:
+                parameters[parameter_name] = None
+            else:
+                reference_asset = asset_options[
+                    selected_asset_id
+                ]
+
+                parameters[parameter_name] = (
+                    build_asset_identifier(
+                        reference_asset
+                    )
+                )
+
+        # -------------------------------------------------
+        # VALUE
+        # -------------------------------------------------
+
+        elif parameter_type == "VALUE":
+            value_type = infer_value_type(
+                parameter,
+                parameter_name,
+                parameters,
+                source_column_metadata,
+            )
+
+            default_value = parameter.get(
+                "default"
+            )
+
+            if value_type == "NUMBER":
+                parameters[parameter_name] = st.number_input(
+                    label,
+                    value=float(
+                        default_value
+                        if default_value is not None
+                        else 0.0
+                    ),
+                    step=float(
+                        parameter.get(
+                            "step",
+                            1.0,
+                        )
+                    ),
+                    key=widget_key,
+                    help=help_text,
+                )
+
+            elif value_type == "INTEGER":
+                parameters[parameter_name] = int(
+                    st.number_input(
+                        label,
+                        value=int(
+                            default_value
+                            if default_value is not None
+                            else 0
+                        ),
+                        step=1,
+                        key=widget_key,
+                        help=help_text,
+                    )
+                )
+
+            elif value_type == "BOOLEAN":
+                parameters[parameter_name] = st.selectbox(
+                    label,
+                    options=[
+                        None,
+                        True,
+                        False,
+                    ],
+                    format_func=lambda value: (
+                        "Select true or false"
+                        if value is None
+                        else str(value).upper()
+                    ),
+                    key=widget_key,
+                    help=help_text,
+                )
+
+            elif value_type == "DATE":
+                selected_date = st.date_input(
+                    label,
+                    value=parse_default_date(
+                        default_value
+                    ),
+                    key=widget_key,
+                    help=help_text,
+                )
+
+                parameters[parameter_name] = (
+                    selected_date.isoformat()
+                )
+
+            elif value_type == "TIMESTAMP":
+                parameters[parameter_name] = st.text_input(
+                    label,
+                    value=(
+                        str(default_value)
+                        if default_value is not None
+                        else ""
+                    ),
+                    placeholder="9999-12-31 23:59:59",
+                    key=widget_key,
+                    help=(
+                        help_text
+                        or "Use YYYY-MM-DD HH:MM:SS."
+                    ),
+                )
+
+            else:
+                parameters[parameter_name] = st.text_input(
+                    label,
+                    value=(
+                        str(default_value)
+                        if default_value is not None
+                        else ""
+                    ),
+                    key=widget_key,
+                    help=(
+                        help_text
+                        or "Enter the required comparison value."
+                    ),
+                )
+
+            st.caption(
+                f"Value input type: {value_type}"
+            )
+
+        # -------------------------------------------------
+        # NUMBER
+        # -------------------------------------------------
+
+        elif parameter_type == "NUMBER":
+            arguments = {
+                "label": label,
+                "value": float(
+                    parameter.get(
+                        "default",
+                        0.0,
+                    )
+                ),
+                "step": float(
+                    parameter.get(
+                        "step",
+                        1.0,
+                    )
+                ),
+                "key": widget_key,
+                "help": help_text,
+            }
+
+            if parameter.get("minimum") is not None:
+                arguments["min_value"] = float(
+                    parameter["minimum"]
+                )
+
+            if parameter.get("maximum") is not None:
+                arguments["max_value"] = float(
+                    parameter["maximum"]
+                )
+
+            parameters[parameter_name] = st.number_input(
+                **arguments
+            )
+
+        # -------------------------------------------------
+        # INTEGER
+        # -------------------------------------------------
+
+        elif parameter_type == "INTEGER":
+            parameters[parameter_name] = int(
+                st.number_input(
+                    label,
+                    min_value=int(
+                        parameter.get(
+                            "minimum",
+                            -2147483648,
+                        )
+                    ),
+                    max_value=int(
+                        parameter.get(
+                            "maximum",
+                            2147483647,
+                        )
+                    ),
+                    value=int(
+                        parameter.get(
+                            "default",
+                            0,
+                        )
+                    ),
+                    step=1,
+                    key=widget_key,
+                    help=help_text,
+                )
+            )
+
+        # -------------------------------------------------
+        # OPERATOR
+        # -------------------------------------------------
+
+        elif parameter_type == "OPERATOR":
+            allowed_operators = parameter.get(
+                "allowed_values",
+                parameter.get(
+                    "options",
+                    DEFAULT_OPERATORS,
+                ),
+            )
+
+            allowed_operators = [
+                str(operator)
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .strip()
+                for operator in allowed_operators
+            ]
+
+            invalid = [
+                operator
+                for operator in allowed_operators
+                if operator not in DEFAULT_OPERATORS
+            ]
+
+            if invalid:
+                parameters[parameter_name] = None
+
+                rendering_errors.append(
+                    f"{parameter_name} contains unsupported "
+                    f"operators: {', '.join(invalid)}."
+                )
+                continue
+
+            parameters[parameter_name] = st.selectbox(
+                label,
+                options=allowed_operators,
+                key=widget_key,
+                help=(
+                    help_text
+                    or "Select the failure comparison operator."
+                ),
+            )
+
+        # -------------------------------------------------
+        # REGEX PRESET
+        # -------------------------------------------------
+
+        elif parameter_type == "REGEX_PRESET":
+            selected_preset = st.selectbox(
+                label,
+                options=list(
+                    REGEX_PRESETS.keys()
+                ),
+                key=widget_key,
+                help=(
+                    help_text
+                    or "Choose an approved regular expression."
+                ),
+            )
+
+            parameters[parameter_name] = (
+                REGEX_PRESETS[
+                    selected_preset
+                ]
+            )
+
+            st.code(
+                parameters[parameter_name],
+                language="text",
+            )
+
+    return parameters, rendering_errors
+
+
+# =========================================================
+# VALIDATION
+# =========================================================
+
+def validate_parameters(
+    parameter_definition,
+    parameters,
+):
+    errors = []
+
+    for parameter in parameter_definition:
+        if not isinstance(parameter, dict):
+            continue
+
+        parameter_name = str(
+            parameter.get(
+                "name",
+                "",
+            )
+        ).strip().upper()
+
+        label = (
+            parameter.get("label")
+            or parameter_name.replace(
+                "_",
+                " ",
+            ).title()
+        )
+
+        if (
+            bool(parameter.get("required", False))
+            and parameter_is_empty(
+                parameters.get(
+                    parameter_name
+                )
+            )
+        ):
+            errors.append(
+                f"{label} is required."
+            )
+
+    if (
+        parameters.get("MIN_VALUE") is not None
+        and parameters.get("MAX_VALUE") is not None
+        and parameters["MIN_VALUE"]
+        > parameters["MAX_VALUE"]
+    ):
+        errors.append(
+            "Minimum Value cannot be greater than Maximum Value."
+        )
+
+    comparison_pairs = [
+        (
+            "START_COLUMN",
+            "END_COLUMN",
+            "Start Column and End Column",
+        ),
+        (
+            "EARLIER_COLUMN",
+            "LATER_COLUMN",
+            "Earlier Column and Later Column",
+        ),
+        (
+            "LEFT_COLUMN",
+            "RIGHT_COLUMN",
+            "Left Column and Right Column",
+        ),
+        (
+            "NUMERATOR_COLUMN",
+            "DENOMINATOR_COLUMN",
+            "Numerator Column and Denominator Column",
+        ),
+    ]
+
+    for left_name, right_name, description in comparison_pairs:
+        if (
+            parameters.get(left_name)
+            and parameters.get(right_name)
+            and parameters[left_name]
+            == parameters[right_name]
+        ):
+            errors.append(
+                f"{description} must be different."
+            )
+
+    return errors
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+conn = None
+cursor = None
+
+try:
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    asset_options = get_active_assets(
+        cursor
+    )
+
+    assets = list(
+        asset_options.values()
+    )
 
     if not assets:
         st.warning(
@@ -150,27 +1414,21 @@ try:
         )
 
     else:
-        # =================================================
-        # 1. SELECT DATA ASSET
-        # =================================================
-
         st.subheader("1. Select Data Asset")
 
-        # -------------------------------------------------
-        # Database
-        # -------------------------------------------------
-
-        databases = sorted(
+        database_options = sorted(
             {
-                row[2]
-                for row in assets
-                if row[2] is not None
+                asset["database_name"]
+                for asset in assets
             }
         )
 
         selected_database = st.selectbox(
             "Database",
-            options=[None] + databases,
+            options=[
+                None,
+                *database_options,
+            ],
             format_func=lambda value: (
                 "Select a database"
                 if value is None
@@ -181,156 +1439,93 @@ try:
         )
 
         selected_schema = None
-        selected_object = None
-        selected_asset_row = None
+        selected_asset = None
 
-        # -------------------------------------------------
-        # Schema
-        # -------------------------------------------------
-
-        if selected_database is not None:
-            schemas = sorted(
+        if selected_database:
+            schema_options = sorted(
                 {
-                    row[3]
-                    for row in assets
-                    if (
-                        row[2] == selected_database
-                        and row[3] is not None
-                    )
+                    asset["schema_name"]
+                    for asset in assets
+                    if asset["database_name"]
+                    == selected_database
                 }
             )
 
-            if schemas:
-                selected_schema = st.selectbox(
-                    "Schema",
-                    options=[None] + schemas,
-                    format_func=lambda value: (
-                        "Select a schema"
-                        if value is None
-                        else value
-                    ),
-                    key="selected_schema",
-                    on_change=reset_after_schema_change,
-                )
+            selected_schema = st.selectbox(
+                "Schema",
+                options=[
+                    None,
+                    *schema_options,
+                ],
+                format_func=lambda value: (
+                    "Select a schema"
+                    if value is None
+                    else value
+                ),
+                key="selected_schema",
+                on_change=reset_after_schema_change,
+            )
 
-            else:
-                st.warning(
-                    "No active schemas were found for "
-                    "the selected database."
-                )
-
-        # -------------------------------------------------
-        # Table / Object
-        # -------------------------------------------------
-
-        if (
-            selected_database is not None
-            and selected_schema is not None
-        ):
+        if selected_database and selected_schema:
             matching_assets = [
-                row
-                for row in assets
+                asset
+                for asset in assets
                 if (
-                    row[2] == selected_database
-                    and row[3] == selected_schema
+                    asset["database_name"]
+                    == selected_database
+                    and asset["schema_name"]
+                    == selected_schema
                 )
             ]
 
             object_options = {
-                f"{row[4]} ({row[5]})": row
-                for row in matching_assets
+                (
+                    f"{asset['object_name']} "
+                    f"({asset['object_type']})"
+                ): asset
+                for asset in matching_assets
             }
 
-            if object_options:
-                selected_object = st.selectbox(
-                    "Table / Object",
-                    options=[None] + list(
-                        object_options.keys()
-                    ),
-                    format_func=lambda value: (
-                        "Select a table or view"
-                        if value is None
-                        else value
-                    ),
-                    key="selected_object",
-                    on_change=reset_after_object_change,
-                )
-
-                if selected_object is not None:
-                    selected_asset_row = (
-                        object_options[selected_object]
-                    )
-
-            else:
-                st.warning(
-                    "No active objects were found for the "
-                    "selected database and schema."
-                )
-
-        # =================================================
-        # CONTINUE AFTER ASSET SELECTION
-        # =================================================
-
-        if selected_asset_row is not None:
-            asset_id = selected_asset_row[0]
-            asset_code = selected_asset_row[1]
-            database_name = selected_asset_row[2]
-            schema_name = selected_asset_row[3]
-            object_name = selected_asset_row[4]
-            object_type = selected_asset_row[5]
-            asset_description = selected_asset_row[6]
-
-            st.success(
-                f"Selected asset: "
-                f"{database_name}."
-                f"{schema_name}."
-                f"{object_name}"
+            selected_object = st.selectbox(
+                "Table / Object",
+                options=[
+                    None,
+                    *object_options.keys(),
+                ],
+                format_func=lambda value: (
+                    "Select a table or view"
+                    if value is None
+                    else value
+                ),
+                key="selected_object",
+                on_change=reset_after_object_change,
             )
 
-            with st.expander(
-                "Asset Details",
-                expanded=False,
-            ):
-                st.write(
-                    f"**Asset ID:** {asset_id}"
-                )
+            if selected_object:
+                selected_asset = object_options[
+                    selected_object
+                ]
 
-                st.write(
-                    f"**Asset Code:** {asset_code}"
-                )
+        if selected_asset:
+            asset_id = selected_asset["asset_id"]
+            asset_code = selected_asset["asset_code"]
+            database_name = selected_asset["database_name"]
+            schema_name = selected_asset["schema_name"]
+            object_name = selected_asset["object_name"]
 
-                st.write(
-                    f"**Database:** {database_name}"
-                )
-
-                st.write(
-                    f"**Schema:** {schema_name}"
-                )
-
-                st.write(
-                    f"**Object:** {object_name}"
-                )
-
-                st.write(
-                    f"**Object Type:** {object_type}"
-                )
-
-                if asset_description:
-                    st.write(
-                        f"**Description:** {asset_description}"
-                    )
-
-            st.divider()
-
-            # =================================================
-            # 2. SELECT TEST
-            # =================================================
+            st.success(
+                f"Selected: {database_name}."
+                f"{schema_name}.{object_name}"
+            )
 
             cursor.execute(
                 """
                 SELECT
                     TEST_ID,
-                    TEST_CODE
+                    TEST_CODE,
+                    TEST_NAME,
+                    TEST_DESCRIPTION,
+                    PARAMETER_DEFINITION
                 FROM DP_DEV_MTD.DATA_QUALITY.DQ_TEST
                 WHERE STATUS = 'ACTIVE'
                 ORDER BY TEST_CODE
@@ -339,341 +1534,129 @@ try:
 
             tests = cursor.fetchall()
 
-            if not tests:
-                st.warning(
-                    "No active data quality tests are "
-                    "currently configured."
-                )
-
-            else:
-                # Correct mapping:
-                # TEST_CODE -> TEST_ID
-                test_options = {
-                    row[1]: row[0]
-                    for row in tests
+            test_options = {
+                row[1]: {
+                    "test_id": row[0],
+                    "test_name": row[2],
+                    "test_description": row[3],
+                    "parameter_definition": row[4],
                 }
+                for row in tests
+            }
 
-                st.subheader("2. Select Test")
+            st.divider()
+            st.subheader("2. Select Test")
 
-                selected_test = st.selectbox(
-                    "Test",
-                    options=[None] + list(
-                        test_options.keys()
-                    ),
-                    format_func=lambda value: (
-                        "Select a test"
-                        if value is None
-                        else value
-                    ),
-                    key="selected_test",
-                    on_change=reset_test_parameters,
+            selected_test = st.selectbox(
+                "Data Quality Test",
+                options=[
+                    None,
+                    *test_options.keys(),
+                ],
+                format_func=lambda value: (
+                    format_test_option(
+                        value,
+                        test_options,
+                    )
+                ),
+                key="selected_test",
+                on_change=reset_test_parameters,
+            )
+
+            if selected_test:
+                metadata = test_options[
+                    selected_test
+                ]
+
+                test_id = metadata["test_id"]
+                test_name = metadata["test_name"]
+
+                st.write(f"### {test_name}")
+
+                if metadata["test_description"]:
+                    st.write(
+                        metadata[
+                            "test_description"
+                        ]
+                    )
+
+                parameter_definition = (
+                    parse_parameter_definition(
+                        metadata[
+                            "parameter_definition"
+                        ]
+                    )
                 )
 
-                # =================================================
-                # CONTINUE AFTER TEST SELECTION
-                # =================================================
+                source_column_metadata = get_object_columns(
+                    cursor=cursor,
+                    database_name=database_name,
+                    schema_name=schema_name,
+                    object_name=object_name,
+                )
 
-                if selected_test is not None:
-                    test_id = test_options[selected_test]
+                st.divider()
+                st.subheader(
+                    "3. Configure Test Parameters"
+                )
 
-                    st.caption(
-                        f"Test ID: {test_id}"
+                parameters, rendering_errors = (
+                    render_parameter_form(
+                        cursor=cursor,
+                        selected_test=selected_test,
+                        parameter_definition=(
+                            parameter_definition
+                        ),
+                        source_column_metadata=(
+                            source_column_metadata
+                        ),
+                        database_name=database_name,
+                        schema_name=schema_name,
+                        object_name=object_name,
+                        asset_options=asset_options,
+                        current_asset_id=asset_id,
                     )
+                )
 
+                for error in rendering_errors:
+                    st.warning(error)
+
+                if not rendering_errors:
                     st.divider()
-
-                    # =============================================
-                    # 3. CONFIGURE TEST PARAMETERS
-                    # =============================================
-
-                    st.subheader(
-                        "3. Configure Test Parameters"
-                    )
-
-                    parameters = {}
-
-                    # ---------------------------------------------
-                    # NULL COUNT
-                    # ---------------------------------------------
-
-                    if selected_test == "NULL_COUNT":
-                        selected_column = st.text_input(
-                            "Column",
-                            placeholder="EMAIL",
-                            key="null_count_column",
-                        )
-
-                        parameters = {
-                            "COLUMN": selected_column.strip(),
-                        }
-
-                    # ---------------------------------------------
-                    # DUPLICATE COUNT
-                    # ---------------------------------------------
-
-                    elif selected_test == "DUPLICATE_COUNT":
-                        selected_column = st.text_input(
-                            "Column",
-                            placeholder="CUSTOMER_ID",
-                            key="duplicate_count_column",
-                        )
-
-                        parameters = {
-                            "COLUMN": selected_column.strip(),
-                        }
-
-                    # ---------------------------------------------
-                    # RANGE CHECK
-                    # ---------------------------------------------
-
-                    elif selected_test in [
-                        "OUT_OF_RANGE_COUNT",
-                        "RANGE_CHECK",
-                    ]:
-                        selected_column = st.text_input(
-                            "Column",
-                            placeholder="AGE",
-                            key="range_column",
-                        )
-
-                        range_col1, range_col2 = st.columns(2)
-
-                        with range_col1:
-                            min_value = st.number_input(
-                                "Minimum Value",
-                                value=0.0,
-                                key="range_min_value",
-                            )
-
-                        with range_col2:
-                            max_value = st.number_input(
-                                "Maximum Value",
-                                value=100.0,
-                                key="range_max_value",
-                            )
-
-                        parameters = {
-                            "COLUMN": selected_column.strip(),
-                            "MIN_VALUE": min_value,
-                            "MAX_VALUE": max_value,
-                        }
-
-                    # ---------------------------------------------
-                    # DATE RANGE
-                    # ---------------------------------------------
-
-                    elif selected_test in [
-                        "DATE_RANGE",
-                        "INVALID_DATE_RANGE_COUNT",
-                    ]:
-                        date_col1, date_col2 = st.columns(2)
-
-                        with date_col1:
-                            start_column = st.text_input(
-                                "Start Column",
-                                placeholder="START_DATE",
-                                key="date_start_column",
-                            )
-
-                        with date_col2:
-                            end_column = st.text_input(
-                                "End Column",
-                                placeholder="END_DATE",
-                                key="date_end_column",
-                            )
-
-                        parameters = {
-                            "START_COLUMN": start_column.strip(),
-                            "END_COLUMN": end_column.strip(),
-                        }
-
-                    # ---------------------------------------------
-                    # MAX LENGTH
-                    # ---------------------------------------------
-
-                    elif selected_test in [
-                        "MAX_LENGTH",
-                        "MAX_LENGTH_COUNT",
-                        "LENGTH_CHECK",
-                    ]:
-                        selected_column = st.text_input(
-                            "Column",
-                            placeholder="CUSTOMER_NAME",
-                            key="length_column",
-                        )
-
-                        max_length = st.number_input(
-                            "Maximum Length",
-                            min_value=1,
-                            value=100,
-                            step=1,
-                            key="maximum_length",
-                        )
-
-                        parameters = {
-                            "COLUMN": selected_column.strip(),
-                            "MAX_LENGTH": int(max_length),
-                        }
-
-                    # ---------------------------------------------
-                    # REGEX / PATTERN
-                    # ---------------------------------------------
-
-                    elif selected_test in [
-                        "PATTERN_CHECK",
-                        "REGEX_MISMATCH_COUNT",
-                        "REGEX_CHECK",
-                    ]:
-                        selected_column = st.text_input(
-                            "Column",
-                            placeholder="EMAIL",
-                            key="pattern_column",
-                        )
-
-                        pattern = st.text_input(
-                            "Pattern",
-                            value=".*@.*",
-                            help=(
-                                "Regular expression used by "
-                                "the selected test."
-                            ),
-                            key="regex_pattern",
-                        )
-
-                        parameters = {
-                            "COLUMN": selected_column.strip(),
-                            "PATTERN": pattern,
-                        }
-
-                    # ---------------------------------------------
-                    # ALLOWED VALUES
-                    # ---------------------------------------------
-
-                    elif selected_test in [
-                        "INVALID_VALUE_COUNT",
-                        "ALLOWED_VALUES",
-                    ]:
-                        selected_column = st.text_input(
-                            "Column",
-                            placeholder="STATUS",
-                            key="allowed_values_column",
-                        )
-
-                        allowed_values_text = st.text_area(
-                            "Allowed Values",
-                            value=(
-                                "ACTIVE\n"
-                                "INACTIVE\n"
-                                "PENDING"
-                            ),
-                            help=(
-                                "Enter one allowed value "
-                                "per line."
-                            ),
-                            key="allowed_values_text",
-                        )
-
-                        allowed_values = [
-                            value.strip()
-                            for value
-                            in allowed_values_text.splitlines()
-                            if value.strip()
-                        ]
-
-                        parameters = {
-                            "COLUMN": selected_column.strip(),
-                            "ALLOWED_VALUES": allowed_values,
-                        }
-
-                    # ---------------------------------------------
-                    # UNKNOWN / NEW TEST
-                    # ---------------------------------------------
-
-                    else:
-                        st.info(
-                            "This test does not currently have "
-                            "a dedicated parameter form. Enter "
-                            "its parameters as JSON."
-                        )
-
-                        raw_parameters = st.text_area(
-                            "Parameters (JSON)",
-                            value="{}",
-                            height=150,
-                            key="raw_parameters",
-                        )
-
-                        try:
-                            parameters = json.loads(
-                                raw_parameters
-                            )
-
-                            if not isinstance(
-                                parameters,
-                                dict,
-                            ):
-                                parameters = None
-
-                                st.error(
-                                    "Parameters must be a JSON "
-                                    "object, for example "
-                                    '{"COLUMN": "EMAIL"}.'
-                                )
-
-                        except json.JSONDecodeError:
-                            parameters = None
-
-                            st.error(
-                                "Parameters must contain "
-                                "valid JSON."
-                            )
-
-                    # ---------------------------------------------
-                    # Preview parameters
-                    # ---------------------------------------------
-
-                    if parameters is not None:
-                        with st.expander(
-                            "Generated Parameters",
-                            expanded=False,
-                        ):
-                            st.json(parameters)
-
-                    st.divider()
-
-                    # =============================================
-                    # 4. CONFIGURE APPLICABILITY
-                    # =============================================
-
                     st.subheader(
                         "4. Configure Applicability"
                     )
 
+                    default_code = (
+                        generate_applicability_code(
+                            asset_code,
+                            object_name,
+                            selected_test,
+                        )
+                    )
+
+                    if (
+                        "applicability_code"
+                        not in st.session_state
+                    ):
+                        st.session_state[
+                            "applicability_code"
+                        ] = default_code
+
                     applicability_code = st.text_input(
                         "Applicability Code",
-                        placeholder=(
-                            "CUSTOMER_EMAIL_NULL_COUNT"
-                        ),
-                        help=(
-                            "Unique code identifying this "
-                            "test and asset configuration."
-                        ),
                         key="applicability_code",
                     )
 
-                    execution_mode = st.selectbox(
+                    execution_mode = st.radio(
                         "Execution Mode",
-                        options=[
+                        [
                             "AUTO",
                             "MANUAL",
                         ],
-                        index=0,
+                        horizontal=True,
                         key="execution_mode",
                     )
-
-                    # ---------------------------------------------
-                    # Scheduling
-                    # ---------------------------------------------
 
                     frequency = None
                     run_day_of_week = None
@@ -682,7 +1665,7 @@ try:
                     if execution_mode == "AUTO":
                         frequency = st.selectbox(
                             "Frequency",
-                            options=[
+                            [
                                 "DAILY",
                                 "WEEKLY",
                                 "MONTHLY",
@@ -693,7 +1676,7 @@ try:
                         if frequency == "WEEKLY":
                             run_day_of_week = st.selectbox(
                                 "Run Day",
-                                options=[
+                                [
                                     "MONDAY",
                                     "TUESDAY",
                                     "WEDNESDAY",
@@ -715,12 +1698,6 @@ try:
                                 key="run_day_of_month",
                             )
 
-                    # ---------------------------------------------
-                    # Pass criteria
-                    # ---------------------------------------------
-
-                    st.write("**Pass Criteria**")
-
                     bound_col1, bound_col2 = st.columns(2)
 
                     with bound_col1:
@@ -737,310 +1714,193 @@ try:
                             key="pass_upper_bound",
                         )
 
-                    st.caption(
-                        "Example: a lower bound of 0 and upper "
-                        "bound of 0 means the metric must equal "
-                        "0 for the test to pass."
-                    )
+                    current_configuration = {
+                        "applicability_code": make_safe_code(
+                            applicability_code
+                        ),
+                        "asset_id": asset_id,
+                        "test_id": test_id,
+                        "parameters": parameters,
+                        "execution_mode": execution_mode,
+                        "frequency": frequency,
+                        "run_day_of_week": run_day_of_week,
+                        "run_day_of_month": run_day_of_month,
+                        "pass_lower_bound": pass_lower_bound,
+                        "pass_upper_bound": pass_upper_bound,
+                    }
 
                     st.divider()
-
-                    # =============================================
-                    # 5. VALIDATE CONFIGURATION
-                    # =============================================
+                    st.subheader(
+                        "5. Review and Create"
+                    )
 
                     if st.button(
-                        "Create Applicability",
+                        "Review Configuration",
                         type="primary",
+                        use_container_width=True,
                     ):
-                        validation_errors = []
+                        validation_errors = (
+                            validate_parameters(
+                                parameter_definition,
+                                parameters,
+                            )
+                        )
 
-                        # -----------------------------------------
-                        # Applicability Code
-                        # -----------------------------------------
+                        code = make_safe_code(
+                            applicability_code
+                        )
 
-                        if not applicability_code.strip():
+                        if not code:
                             validation_errors.append(
                                 "Applicability Code is required."
                             )
-
-                        # -----------------------------------------
-                        # Parameters
-                        # -----------------------------------------
-
-                        if parameters is None:
-                            validation_errors.append(
-                                "Test parameters are invalid."
-                            )
-
-                        # -----------------------------------------
-                        # Column parameters
-                        # -----------------------------------------
-
-                        single_column_tests = [
-                            "NULL_COUNT",
-                            "DUPLICATE_COUNT",
-                            "OUT_OF_RANGE_COUNT",
-                            "RANGE_CHECK",
-                            "MAX_LENGTH",
-                            "MAX_LENGTH_COUNT",
-                            "LENGTH_CHECK",
-                            "PATTERN_CHECK",
-                            "REGEX_MISMATCH_COUNT",
-                            "REGEX_CHECK",
-                            "INVALID_VALUE_COUNT",
-                            "ALLOWED_VALUES",
-                        ]
-
-                        if (
-                            selected_test in single_column_tests
-                            and parameters is not None
-                            and not parameters.get("COLUMN")
+                        elif applicability_code_exists(
+                            cursor,
+                            code,
                         ):
                             validation_errors.append(
-                                "Column is required."
+                                "The Applicability Code already exists."
                             )
-
-                        # -----------------------------------------
-                        # Pass bounds
-                        # -----------------------------------------
 
                         if (
                             pass_lower_bound
                             > pass_upper_bound
                         ):
                             validation_errors.append(
-                                "Pass Lower Bound cannot be "
-                                "greater than Pass Upper Bound."
+                                "Pass Lower Bound cannot be greater "
+                                "than Pass Upper Bound."
                             )
-
-                        # -----------------------------------------
-                        # Range validation
-                        # -----------------------------------------
-
-                        if (
-                            selected_test in [
-                                "OUT_OF_RANGE_COUNT",
-                                "RANGE_CHECK",
-                            ]
-                            and parameters is not None
-                            and (
-                                parameters.get("MIN_VALUE")
-                                > parameters.get("MAX_VALUE")
-                            )
-                        ):
-                            validation_errors.append(
-                                "Minimum Value cannot be greater "
-                                "than Maximum Value."
-                            )
-
-                        # -----------------------------------------
-                        # Date range validation
-                        # -----------------------------------------
-
-                        if (
-                            selected_test in [
-                                "DATE_RANGE",
-                                "INVALID_DATE_RANGE_COUNT",
-                            ]
-                            and parameters is not None
-                        ):
-                            if not parameters.get(
-                                "START_COLUMN"
-                            ):
-                                validation_errors.append(
-                                    "Start Column is required."
-                                )
-
-                            if not parameters.get(
-                                "END_COLUMN"
-                            ):
-                                validation_errors.append(
-                                    "End Column is required."
-                                )
-
-                            if (
-                                parameters.get("START_COLUMN")
-                                and parameters.get("END_COLUMN")
-                                and parameters.get(
-                                    "START_COLUMN"
-                                )
-                                == parameters.get(
-                                    "END_COLUMN"
-                                )
-                            ):
-                                validation_errors.append(
-                                    "Start Column and End Column "
-                                    "must be different."
-                                )
-
-                        # -----------------------------------------
-                        # Allowed values
-                        # -----------------------------------------
-
-                        if (
-                            selected_test in [
-                                "INVALID_VALUE_COUNT",
-                                "ALLOWED_VALUES",
-                            ]
-                            and parameters is not None
-                            and not parameters.get(
-                                "ALLOWED_VALUES"
-                            )
-                        ):
-                            validation_errors.append(
-                                "At least one allowed value "
-                                "is required."
-                            )
-
-                        # -----------------------------------------
-                        # Pattern
-                        # -----------------------------------------
-
-                        if (
-                            selected_test in [
-                                "PATTERN_CHECK",
-                                "REGEX_MISMATCH_COUNT",
-                                "REGEX_CHECK",
-                            ]
-                            and parameters is not None
-                            and not str(
-                                parameters.get(
-                                    "PATTERN",
-                                    "",
-                                )
-                            ).strip()
-                        ):
-                            validation_errors.append(
-                                "Pattern is required."
-                            )
-
-                        # =========================================
-                        # VALIDATION RESULT
-                        # =========================================
 
                         if validation_errors:
+                            st.session_state.pop(
+                                "pending_applicability",
+                                None,
+                            )
+
                             for error in validation_errors:
                                 st.error(error)
-
                         else:
-                            st.success(
-                                "Applicability configuration "
-                                "is valid."
+                            current_configuration[
+                                "applicability_code"
+                            ] = code
+
+                            st.session_state[
+                                "pending_applicability"
+                            ] = current_configuration
+
+                    reviewed = st.session_state.get(
+                        "pending_applicability"
+                    )
+
+                    if reviewed:
+                        configuration_is_current = (
+                            reviewed
+                            == current_configuration
+                        )
+
+                        st.json(reviewed)
+
+                        if not configuration_is_current:
+                            st.warning(
+                                "The configuration changed after "
+                                "review. Review it again."
                             )
 
-                            # -------------------------------------
-                            # Configuration summary
-                            # -------------------------------------
-
-                            st.subheader(
-                                "Configuration Summary"
-                            )
-
-                            summary_col1, summary_col2 = (
-                                st.columns(2)
-                            )
-
-                            with summary_col1:
-                                st.write("**Asset**")
-
-                                st.code(
-                                    f"{database_name}."
-                                    f"{schema_name}."
-                                    f"{object_name}"
-                                )
-
-                                st.write(
-                                    f"**Asset ID:** {asset_id}"
-                                )
-
-                                st.write(
-                                    f"**Asset Code:** "
-                                    f"{asset_code}"
-                                )
-
-                                st.write(
-                                    f"**Test:** {selected_test}"
-                                )
-
-                                st.write(
-                                    f"**Test ID:** {test_id}"
-                                )
-
-                            with summary_col2:
-                                st.write(
-                                    "**Applicability**"
-                                )
-
-                                st.write(
-                                    f"**Code:** "
-                                    f"{applicability_code}"
-                                )
-
-                                st.write(
-                                    f"**Execution Mode:** "
-                                    f"{execution_mode}"
-                                )
-
-                                if frequency:
-                                    st.write(
-                                        f"**Frequency:** "
-                                        f"{frequency}"
+                        elif st.button(
+                            "Create Applicability",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            try:
+                                if applicability_code_exists(
+                                    cursor,
+                                    reviewed[
+                                        "applicability_code"
+                                    ],
+                                ):
+                                    st.error(
+                                        "The Applicability Code "
+                                        "already exists."
+                                    )
+                                else:
+                                    cursor.execute(
+                                        """
+                                        INSERT INTO DP_DEV_MTD.DATA_QUALITY.DQ_APPLICABILITY
+                                        (
+                                            APPLICABILITY_CODE,
+                                            ASSET_ID,
+                                            TEST_ID,
+                                            PARAMETERS,
+                                            EXECUTION_MODE,
+                                            FREQUENCY,
+                                            RUN_DAY_OF_WEEK,
+                                            RUN_DAY_OF_MONTH,
+                                            PASS_LOWER_BOUND,
+                                            PASS_UPPER_BOUND,
+                                            STATUS
+                                        )
+                                        SELECT
+                                            %s,
+                                            %s,
+                                            %s,
+                                            PARSE_JSON(%s),
+                                            %s,
+                                            %s,
+                                            %s,
+                                            %s,
+                                            %s,
+                                            %s,
+                                            'ACTIVE'
+                                        """,
+                                        (
+                                            reviewed[
+                                                "applicability_code"
+                                            ],
+                                            reviewed["asset_id"],
+                                            reviewed["test_id"],
+                                            json.dumps(
+                                                reviewed[
+                                                    "parameters"
+                                                ]
+                                            ),
+                                            reviewed[
+                                                "execution_mode"
+                                            ],
+                                            reviewed["frequency"],
+                                            reviewed[
+                                                "run_day_of_week"
+                                            ],
+                                            reviewed[
+                                                "run_day_of_month"
+                                            ],
+                                            reviewed[
+                                                "pass_lower_bound"
+                                            ],
+                                            reviewed[
+                                                "pass_upper_bound"
+                                            ],
+                                        ),
                                     )
 
-                                if run_day_of_week:
-                                    st.write(
-                                        f"**Run Day:** "
-                                        f"{run_day_of_week}"
+                                    conn.commit()
+
+                                    st.success(
+                                        "Applicability created successfully."
                                     )
 
-                                if run_day_of_month:
-                                    st.write(
-                                        f"**Run Day:** "
-                                        f"{run_day_of_month}"
-                                    )
+                            except Exception as insert_error:
+                                conn.rollback()
 
-                                st.write(
-                                    f"**Pass Bounds:** "
-                                    f"{pass_lower_bound} to "
-                                    f"{pass_upper_bound}"
+                                st.error(
+                                    "Failed to create applicability: "
+                                    f"{insert_error}"
                                 )
 
-                            st.write("**Parameters**")
-                            st.json(parameters)
-
-                            parameters_json = json.dumps(
-                                parameters
-                            )
-
-                            st.caption("PARAMETERS value")
-
-                            st.code(
-                                parameters_json,
-                                language="json",
-                            )
-
-                            st.info(
-                                "This currently validates and "
-                                "previews the configuration. "
-                                "It does not insert a row into "
-                                "DQ_APPLICABILITY yet."
-                            )
-
-
-# =========================================================
-# ERROR HANDLING
-# =========================================================
-
-except Exception as e:
+except Exception as error:
     st.error(
-        f"Failed to load applicability configuration: {e}"
+        "Failed to load applicability configuration: "
+        f"{error}"
     )
-
-
-# =========================================================
-# CLOSE CONNECTION
-# =========================================================
 
 finally:
     if cursor is not None:
