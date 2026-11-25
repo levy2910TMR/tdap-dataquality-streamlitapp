@@ -138,10 +138,9 @@ def reset_test_parameters():
     clear_widget_keys(
         [
             "applicability_code",
-            "execution_mode",
             "frequency",
-            "run_day_of_week",
             "run_day_of_month",
+            "run_month_of_year",
             "pass_lower_bound",
             "pass_upper_bound",
             "pending_applicability",
@@ -155,10 +154,9 @@ def reset_applicability_configuration():
         [
             "selected_test",
             "applicability_code",
-            "execution_mode",
             "frequency",
-            "run_day_of_week",
             "run_day_of_month",
+            "run_month_of_year",
             "pass_lower_bound",
             "pass_upper_bound",
             "pending_applicability",
@@ -957,55 +955,33 @@ try:
                         key="applicability_code",
                     )
 
-                    execution_mode = st.radio(
-                        "Execution Mode",
-                        [
-                            "AUTO",
-                            "MANUAL",
-                        ],
-                        horizontal=True,
-                        key="execution_mode",
+                    frequency = st.selectbox(
+                        "Frequency",
+                        ["DAILY", "MONTHLY", "YEARLY"],
+                        key="frequency",
                     )
-
-                    frequency = None
-                    run_day_of_week = None
                     run_day_of_month = None
+                    run_month_of_year = None
 
-                    if execution_mode == "AUTO":
-                        frequency = st.selectbox(
-                            "Frequency",
-                            [
-                                "DAILY",
-                                "WEEKLY",
-                                "MONTHLY",
-                            ],
-                            key="frequency",
+                    if frequency in ("MONTHLY", "YEARLY"):
+                        run_day_of_month = st.number_input(
+                            "Run Day of Month",
+                            min_value=1,
+                            max_value=31,
+                            value=1,
+                            step=1,
+                            key="run_day_of_month",
                         )
 
-                        if frequency == "WEEKLY":
-                            run_day_of_week = st.selectbox(
-                                "Run Day",
-                                [
-                                    "MONDAY",
-                                    "TUESDAY",
-                                    "WEDNESDAY",
-                                    "THURSDAY",
-                                    "FRIDAY",
-                                    "SATURDAY",
-                                    "SUNDAY",
-                                ],
-                                key="run_day_of_week",
-                            )
-
-                        elif frequency == "MONTHLY":
-                            run_day_of_month = st.number_input(
-                                "Run Day of Month",
-                                min_value=1,
-                                max_value=31,
-                                value=1,
-                                step=1,
-                                key="run_day_of_month",
-                            )
+                    if frequency == "YEARLY":
+                        run_month_of_year = st.number_input(
+                            "Run Month of Year",
+                            min_value=1,
+                            max_value=12,
+                            value=1,
+                            step=1,
+                            key="run_month_of_year",
+                        )
 
                     bound_col1, bound_col2 = st.columns(2)
 
@@ -1030,10 +1006,9 @@ try:
                         "asset_id": asset_id,
                         "test_id": test_id,
                         "parameters": parameters,
-                        "execution_mode": execution_mode,
                         "frequency": frequency,
-                        "run_day_of_week": run_day_of_week,
                         "run_day_of_month": run_day_of_month,
+                        "run_month_of_year": run_month_of_year,
                         "pass_lower_bound": pass_lower_bound,
                         "pass_upper_bound": pass_upper_bound,
                     }
@@ -1077,6 +1052,14 @@ try:
                                 "Pass Lower Bound cannot be greater "
                                 "than Pass Upper Bound."
                             )
+
+                        if frequency == "YEARLY":
+                            try:
+                                date(2000, run_month_of_year, run_day_of_month)
+                            except ValueError:
+                                validation_errors.append(
+                                    "The yearly run day is not valid for the selected month."
+                                )
 
                         if validation_errors:
                             st.session_state.pop(
@@ -1138,10 +1121,9 @@ try:
                                             ASSET_ID,
                                             TEST_ID,
                                             PARAMETERS,
-                                            EXECUTION_MODE,
                                             FREQUENCY,
-                                            RUN_DAY_OF_WEEK,
                                             RUN_DAY_OF_MONTH,
+                                            RUN_MONTH_OF_YEAR,
                                             PASS_LOWER_BOUND,
                                             PASS_UPPER_BOUND,
                                             STATUS
@@ -1151,7 +1133,6 @@ try:
                                             %s,
                                             %s,
                                             PARSE_JSON(%s),
-                                            %s,
                                             %s,
                                             %s,
                                             %s,
@@ -1170,15 +1151,12 @@ try:
                                                     "parameters"
                                                 ]
                                             ),
-                                            reviewed[
-                                                "execution_mode"
-                                            ],
                                             reviewed["frequency"],
                                             reviewed[
-                                                "run_day_of_week"
+                                                "run_day_of_month"
                                             ],
                                             reviewed[
-                                                "run_day_of_month"
+                                                "run_month_of_year"
                                             ],
                                             reviewed[
                                                 "pass_lower_bound"

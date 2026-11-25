@@ -7,7 +7,6 @@ from connection import get_connection
 st.title("Data Quality Applicabilities")
 
 
-@st.cache_data(ttl=60)
 def load_applicabilities():
     conn = None
 
@@ -27,10 +26,9 @@ def load_applicabilities():
                 S.SCHEMA_NAME,
                 S.OBJECT_NAME,
                 A.PARAMETERS,
-                A.EXECUTION_MODE,
                 A.FREQUENCY,
-                A.RUN_DAY_OF_WEEK,
                 A.RUN_DAY_OF_MONTH,
+                A.RUN_MONTH_OF_YEAR,
                 A.PASS_LOWER_BOUND,
                 A.PASS_UPPER_BOUND
             FROM DP_DEV_MTD.DATA_QUALITY.DQ_APPLICABILITY A
@@ -74,7 +72,6 @@ def filter_applicabilities(df, search):
 
 
 if st.button("Refresh Applicabilities"):
-    load_applicabilities.clear()
     st.rerun()
 
 try:

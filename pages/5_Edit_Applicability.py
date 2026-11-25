@@ -1,4 +1,5 @@
 import json
+from datetime import date
 
 import pandas as pd
 import streamlit as st
@@ -11,7 +12,7 @@ from parameter_controls import (
 )
 
 
-st.title("Edit or Delete Applicability")
+st.title("Edit Applicability")
 
 
 def load_editor_data():
@@ -25,10 +26,9 @@ def load_editor_data():
                 A.ASSET_ID,
                 A.TEST_ID,
                 TO_JSON(A.PARAMETERS) AS PARAMETERS_JSON,
-                A.EXECUTION_MODE,
                 A.FREQUENCY,
-                A.RUN_DAY_OF_WEEK,
                 A.RUN_DAY_OF_MONTH,
+                A.RUN_MONTH_OF_YEAR,
                 A.PASS_LOWER_BOUND,
                 A.PASS_UPPER_BOUND,
                 A.STATUS
@@ -213,56 +213,45 @@ try:
                 for error in rendering_errors:
                     st.warning(error)
 
-                current_mode = record["EXECUTION_MODE"] or "AUTO"
-                modes = list(
-                    dict.fromkeys(
-                        [current_mode, "AUTO", "MANUAL"]
-                    )
+                frequencies = ["DAILY", "MONTHLY", "YEARLY"]
+                current_frequency = record["FREQUENCY"]
+                if current_frequency not in frequencies:
+                    current_frequency = None
+                frequency = st.selectbox(
+                    "Frequency",
+                    options=frequencies,
+                    index=(
+                        frequencies.index(current_frequency)
+                        if current_frequency is not None
+                        else None
+                    ),
+                    placeholder="Select a frequency",
+                    key=f"edit_frequency_{widget_suffix}",
                 )
-                execution_mode = st.radio(
-                    "Execution Mode",
-                    options=modes,
-                    index=modes.index(current_mode),
-                    horizontal=True,
-                    key=f"edit_mode_{widget_suffix}",
-                )
-
-                frequency = None
-                run_day_of_week = None
                 run_day_of_month = None
-                if execution_mode == "AUTO":
-                    frequencies = ["DAILY", "WEEKLY", "MONTHLY"]
-                    current_frequency = record["FREQUENCY"]
-                    if current_frequency not in frequencies:
-                        current_frequency = "DAILY"
-                    frequency = st.selectbox(
-                        "Frequency",
-                        options=frequencies,
-                        index=frequencies.index(current_frequency),
-                        key=f"edit_frequency_{widget_suffix}",
+                run_month_of_year = None
+                if frequency in ("MONTHLY", "YEARLY"):
+                    current_day = record["RUN_DAY_OF_MONTH"]
+                    if pd.isna(current_day):
+                        current_day = 1
+                    run_day_of_month = st.number_input(
+                        "Run Day of Month",
+                        min_value=1,
+                        max_value=31,
+                        value=int(current_day),
+                        key=f"edit_monthday_{widget_suffix}",
                     )
-                    if frequency == "WEEKLY":
-                        current_day = record["RUN_DAY_OF_WEEK"]
-                        if current_day is None:
-                            current_day = 1
-                        run_day_of_week = st.number_input(
-                            "Run Day of Week (1-7)",
-                            min_value=1,
-                            max_value=7,
-                            value=int(current_day),
-                            key=f"edit_weekday_{widget_suffix}",
-                        )
-                    elif frequency == "MONTHLY":
-                        current_day = record["RUN_DAY_OF_MONTH"]
-                        if current_day is None:
-                            current_day = 1
-                        run_day_of_month = st.number_input(
-                            "Run Day of Month",
-                            min_value=1,
-                            max_value=31,
-                            value=int(current_day),
-                            key=f"edit_monthday_{widget_suffix}",
-                        )
+                if frequency == "YEARLY":
+                    current_month = record["RUN_MONTH_OF_YEAR"]
+                    if pd.isna(current_month):
+                        current_month = 1
+                    run_month_of_year = st.number_input(
+                        "Run Month of Year",
+                        min_value=1,
+                        max_value=12,
+                        value=int(current_month),
+                        key=f"edit_month_{widget_suffix}",
+                    )
 
                 bound_columns = st.columns(2)
                 bounds = {}
@@ -334,6 +323,16 @@ try:
                             raise ValueError(
                                 "Applicability Code is required."
                             )
+                        if frequency is None:
+                            raise ValueError("Select a frequency.")
+                        if frequency == "YEARLY":
+                            try:
+                                date(2000, run_month_of_year, run_day_of_month)
+                            except ValueError:
+                                raise ValueError(
+                                    "The yearly run day is not valid for "
+                                    "the selected month."
+                                )
                         if (
                             bounds["LOWER"] is not None
                             and bounds["UPPER"] is not None
@@ -369,10 +368,9 @@ try:
                                     ASSET_ID = %s,
                                     TEST_ID = %s,
                                     PARAMETERS = PARSE_JSON(%s),
-                                    EXECUTION_MODE = %s,
                                     FREQUENCY = %s,
-                                    RUN_DAY_OF_WEEK = %s,
                                     RUN_DAY_OF_MONTH = %s,
+                                    RUN_MONTH_OF_YEAR = %s,
                                     PASS_LOWER_BOUND = %s,
                                     PASS_UPPER_BOUND = %s,
                                     STATUS = %s,
@@ -385,10 +383,9 @@ try:
                                     asset_id,
                                     test_id,
                                     json.dumps(parsed_parameters),
-                                    execution_mode,
                                     frequency,
-                                    run_day_of_week,
                                     run_day_of_month,
+                                    run_month_of_year,
                                     bounds["LOWER"],
                                     bounds["UPPER"],
                                     status,

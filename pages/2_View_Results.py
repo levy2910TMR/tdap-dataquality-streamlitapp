@@ -1,6 +1,7 @@
 import json
 from datetime import date, datetime, time, timedelta
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -170,8 +171,8 @@ try:
             results["END_TS"] - results["START_TS"]
         ).dt.total_seconds().round(2)
 
-        results_tab, coverage_tab = st.tabs(
-            ["Results", "Execution Coverage"]
+        results_tab, trends_tab, coverage_tab = st.tabs(
+            ["Results", "Table Trends", "Execution Coverage"]
         )
 
         with results_tab:
@@ -242,38 +243,38 @@ try:
                         key="results_search",
                     )
 
-                filtered_results = result_rows.copy()
-                if selected_outcome != "All":
-                    filtered_results = filtered_results.loc[
-                        filtered_results["RESULT_OUTCOME"].astype(str)
-                        == selected_outcome
-                    ]
-                if selected_test != "All":
-                    filtered_results = filtered_results.loc[
-                        filtered_results["TEST_CODE"].astype(str)
-                        == selected_test
-                    ]
-                if selected_asset != "All":
-                    filtered_results = filtered_results.loc[
-                        filtered_results["ASSET"] == selected_asset
-                    ]
-                if search.strip():
-                    searchable = filtered_results[
-                        [
-                            "APPLICABILITY_CODE",
-                            "EXECUTION_ID",
-                            "TEST_CODE",
-                            "TEST_NAME",
-                            "ASSET_CODE",
-                            "ASSET",
+                def apply_result_filters(frame):
+                    if selected_outcome != "All":
+                        frame = frame.loc[
+                            frame["RESULT_OUTCOME"].astype(str)
+                            == selected_outcome
                         ]
-                    ].fillna("").astype(str)
-                    matches = searchable.apply(
-                        lambda column: column.str.contains(
-                            search.strip(), case=False, regex=False
-                        )
-                    ).any(axis=1)
-                    filtered_results = filtered_results.loc[matches]
+                    if selected_test != "All":
+                        frame = frame.loc[
+                            frame["TEST_CODE"].astype(str) == selected_test
+                        ]
+                    if selected_asset != "All":
+                        frame = frame.loc[frame["ASSET"] == selected_asset]
+                    if search.strip():
+                        searchable = frame[
+                            [
+                                "APPLICABILITY_CODE",
+                                "EXECUTION_ID",
+                                "TEST_CODE",
+                                "TEST_NAME",
+                                "ASSET_CODE",
+                                "ASSET",
+                            ]
+                        ].fillna("").astype(str)
+                        matches = searchable.apply(
+                            lambda column: column.str.contains(
+                                search.strip(), case=False, regex=False
+                            )
+                        ).any(axis=1)
+                        frame = frame.loc[matches]
+                    return frame.copy()
+
+                filtered_results = apply_result_filters(result_rows)
 
                 outcome_values = (
                     filtered_results["RESULT_OUTCOME"]
@@ -476,6 +477,123 @@ try:
                         st.info(
                             "No generated SQL is stored for this execution."
                         )
+
+        with trends_tab:
+            st.subheader("Table trends")
+            trend_results = results.loc[
+                results["RESULT_FOUND"] & results["ASSET_ID"].notna()
+            ].copy()
+            if trend_results.empty:
+                st.info("No table results were recorded in this date range.")
+            else:
+                asset_labels = {}
+                for _, row in trend_results.iterrows():
+                    asset_id = row["ASSET_ID"]
+                    asset_name = row["ASSET"]
+                    if not asset_name.strip("."):
+                        asset_name = f"Asset {asset_id}"
+                    asset_labels[asset_id] = f"{asset_name} (ID {asset_id})"
+
+                selected_asset_id = st.selectbox(
+                    "Table",
+                    options=sorted(
+                        asset_labels, key=lambda item: asset_labels[item]
+                    ),
+                    format_func=lambda item: asset_labels[item],
+                    key="trend_asset_id",
+                )
+                table_results = trend_results.loc[
+                    trend_results["ASSET_ID"] == selected_asset_id
+                ].copy()
+                table_results["METRIC_VALUE"] = pd.to_numeric(
+                    table_results["METRIC_VALUE"], errors="coerce"
+                )
+                table_results = table_results.dropna(
+                    subset=["RESULT_TS", "METRIC_VALUE"]
+                )
+
+                if table_results.empty:
+                    st.info("No numeric metrics are available for this table.")
+                else:
+                    table_results["TEST_GROUP"] = table_results.apply(
+                        lambda row: (
+                            str(row["TEST_ID"])
+                            if pd.notna(row["TEST_ID"])
+                            else "Unknown"
+                        ),
+                        axis=1,
+                    )
+                    test_labels = {}
+                    for _, row in table_results.iterrows():
+                        test_name = row["TEST_NAME"]
+                        test_code = row["TEST_CODE"]
+                        if pd.notna(test_name) and str(test_name).strip():
+                            label = str(test_name)
+                        else:
+                            label = "Unknown test"
+                        if pd.notna(test_code) and str(test_code).strip():
+                            label = f"{label} ({test_code})"
+                        test_labels[row["TEST_GROUP"]] = (
+                            f"{label} - ID {row['TEST_GROUP']}"
+                        )
+
+                    selected_test_group = st.selectbox(
+                        "Test type",
+                        options=["All", *sorted(
+                            test_labels, key=lambda item: test_labels[item]
+                        )],
+                        format_func=lambda item: (
+                            "All" if item == "All" else test_labels[item]
+                        ),
+                        key="trend_test_group",
+                    )
+                    table_results["APPLICABILITY_LABEL"] = table_results.apply(
+                        lambda row: (
+                            f"{row['APPLICABILITY_CODE']} "
+                            f"(ID {row['APPLICABILITY_ID']})"
+                            if pd.notna(row["APPLICABILITY_ID"])
+                            and pd.notna(row["APPLICABILITY_CODE"])
+                            and str(row["APPLICABILITY_CODE"]).strip()
+                            else (
+                                f"Applicability {row['APPLICABILITY_ID']}"
+                                if pd.notna(row["APPLICABILITY_ID"])
+                                else f"Unlinked result {row['RESULT_ID']}"
+                            )
+                        ),
+                        axis=1,
+                    )
+                    groups = (
+                        sorted(test_labels, key=lambda item: test_labels[item])
+                        if selected_test_group == "All"
+                        else [selected_test_group]
+                    )
+                    for test_group in groups:
+                        st.subheader(test_labels[test_group])
+                        chart_data = table_results.loc[
+                            table_results["TEST_GROUP"] == test_group
+                        ].sort_values("RESULT_TS")
+                        chart = alt.Chart(chart_data).mark_line(
+                            point=True
+                        ).encode(
+                            x=alt.X("RESULT_TS:T", title="Run time"),
+                            y=alt.Y("METRIC_VALUE:Q", title="Metric value"),
+                            color=alt.Color(
+                                "APPLICABILITY_LABEL:N", title="Applicability"
+                            ),
+                            tooltip=[
+                                alt.Tooltip(
+                                    "APPLICABILITY_LABEL:N",
+                                    title="Applicability",
+                                ),
+                                alt.Tooltip("RESULT_TS:T", title="Run time"),
+                                alt.Tooltip("METRIC_VALUE:Q", title="Metric"),
+                                alt.Tooltip(
+                                    "RESULT_OUTCOME:N", title="Outcome"
+                                ),
+                                alt.Tooltip("RESULT_ID:N", title="Result ID"),
+                            ],
+                        )
+                        st.altair_chart(chart, use_container_width=True)
 
         with coverage_tab:
             st.subheader("Execution-to-result reconciliation")
